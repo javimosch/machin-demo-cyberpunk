@@ -1,17 +1,15 @@
 // machin-demo-cyberpunk — an INFINITE procedural planet you fly through, written
 // in machin (MFL) and rendered with raylib. WASD + mouse to fly; the terrain
-// streams in chunks around you (a free-flying camera over endless wasteland),
-// with Blade-Runner-style neon megastructures rising out of the haze.
+// streams in chunks around you — endless noise wasteland under a hazy sky, packed
+// with grimy Blade-Runner megastructures, scattered scrub and drifting drones.
 //
 //   ./build.sh && ./machin-demo-cyberpunk
 //   WASD + mouse to fly · Space/Ctrl = up/down · Shift = boost · Esc = quit
 //
-// This is the dogfood for machin's **noise** builtins: every hill, valley, and
-// building placement comes from `noise2` (layered into fbm). It stitches together
-// the whole stack the game series built — Perlin noise (v0.49.0), native math
-// (v0.46.0), nested Camera3D (v0.45.0), and the pointer/array FFI GPU meshes
-// (v0.47-0.48): each chunk is a GPU mesh built from noise, uploaded once, and
-// unloaded as you leave it behind.
+// Dogfood for machin's `noise` builtins (v0.49.0): terrain, building shapes, and
+// scatter all come from `noise2` (layered into fbm). It composes the whole stack —
+// noise, native math, nested Camera3D, and the pointer/array FFI GPU meshes. Each
+// chunk is a GPU mesh built from noise, uploaded once, unloaded as you leave it.
 
 extern "raylib" {
     header "raylib.h"
@@ -45,50 +43,48 @@ extern "raylib" {
     fn CloseWindow()
 }
 
+// rlgl: the terrain surface is seen from above and below, so don't cull it
+extern "rlgl" { fn rlDisableBackfaceCulling() }
+
 func WIN_W() (n) { n = 1120 }
 func WIN_H() (n) { n = 680 }
-func CHUNK() (n) { n = 44.0 }     // world units per chunk
-func CELLS() (n) { n = 20 }       // grid resolution per chunk
-func RAD() (n) { n = 3 }          // chunk radius around camera (RAD*2+1 per side)
-func MAXC() (n) { n = 72 }        // chunk slot pool size
+func CHUNK() (n) { n = 46.0 }      // world units per chunk
+func CELLS() (n) { n = 16 }        // terrain mesh resolution per chunk
+func RAD() (n) { n = 3 }           // chunk radius around camera
+func MAXC() (n) { n = 72 }         // chunk slot pool size
+func BUDGET() (n) { n = 4 }        // max chunk meshes built per frame (keeps motion smooth)
 
 func col(r, g, b) (c) { c = Color{r, g, b, 255} }
 func white() (c) { c = Color{255, 255, 255, 255} }
 func v3(x, y, z) (v) { v = Vector3{x, y, z} }
 func clampf(v, lo, hi) (o) { o = v  if o < lo { o = lo }  if o > hi { o = hi } }
 func iabs(n) (r) { r = n  if n < 0 { r = 0 - n } }
+func fabs(v) (o) { o = v  if v < 0.0 { o = 0.0 - v } }
 
-// ---- the world: fractal noise terrain ----
+// quasi-random [0,1) from a world position + a salt — high-frequency noise so
+// adjacent cells decorrelate (lots of per-building variety)
+func rnd(x, z, salt) (v) { v = noise2(x * 2.7 + salt * 19.3, z * 2.7 - salt * 7.1) * 0.5 + 0.5 }
+
+// ---- terrain ----
 
 func fbm(x, z) (s) {
-    s = 0.0
-    amp := 1.0
-    fr := 1.0
-    o := 0
-    while o < 5 {
-        s = s + amp * noise2(x * fr, z * fr)
-        amp = amp * 0.5
-        fr = fr * 2.0
-        o = o + 1
-    }
+    s = 0.0  amp := 1.0  fr := 1.0  o := 0
+    while o < 5 { s = s + amp * noise2(x * fr, z * fr)  amp = amp * 0.5  fr = fr * 2.0  o = o + 1 }
 }
-
-// terrain height at a world (x, z)
 func terrain_h(wx, wz) (h) {
-    base := fbm(wx * 0.010, wz * 0.010)        // rolling landmass
-    h = 17.0 * base + 5.0 * noise2(wx * 0.045, wz * 0.045)
+    h = 17.0 * fbm(wx * 0.010, wz * 0.010) + 5.0 * noise2(wx * 0.045, wz * 0.045)
 }
 
-// a neon hue, cycling
 func neon(k) (c) {
-    m := iabs(k) % 4
+    m := iabs(k) % 5
     c = col(40, 230, 230)
     if m == 1 { c = col(235, 60, 200) }
     if m == 2 { c = col(245, 150, 40) }
     if m == 3 { c = col(120, 235, 90) }
+    if m == 4 { c = col(245, 70, 90) }
 }
 
-// ---- chunk mesh (a GPU mesh built from noise, in world coordinates) ----
+// ---- chunk terrain mesh (GPU, world coordinates) ----
 
 func put_tri(vbuf, cbuf, vi, ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b) (nvi) {
     poke_f32(vbuf, vi * 12, ax)       poke_f32(vbuf, vi * 12 + 4, ay)       poke_f32(vbuf, vi * 12 + 8, az)
@@ -102,48 +98,36 @@ func put_tri(vbuf, cbuf, vi, ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b) (nvi) 
     nvi = vi + 3
 }
 
-// flat-shaded, dark wasteland palette
+// flat-shaded by |normal.y| (lit from both sides), dark grimy wasteland palette
 func shade_color(x0, y0, z0, x1, y1, z1, x2, y2, z2, ha) (r, g, b) {
     nx := (y1 - y0) * (z2 - z0) - (z1 - z0) * (y2 - y0)
     ny := (z1 - z0) * (x2 - x0) - (x1 - x0) * (z2 - z0)
     nz := (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
     ln := sqrt(nx * nx + ny * ny + nz * nz) + 0.0001
-    sh := 0.45 + 0.55 * clampf(ny / ln, 0.0, 1.0)
-
-    br := 46.0  bg := 40.0  bb := 38.0          // muddy ground
-    if ha < 0.0 - 3.0 { br = 22.0  bg = 30.0  bb = 40.0 }   // low basin (cold)
-    if ha > 6.0 { br = 80.0  bg = 76.0  bb = 72.0 }         // high rock
-    if ha > 11.0 { br = 120.0  bg = 120.0  bb = 128.0 }     // peaks
+    sh := 0.40 + 0.60 * clampf(fabs(ny) / ln, 0.0, 1.0)
+    br := 44.0  bg := 40.0  bb := 36.0
+    if ha < 0.0 - 3.0 { br = 24.0  bg = 32.0  bb = 42.0 }
+    if ha > 6.0 { br = 74.0  bg = 70.0  bb = 64.0 }
+    if ha > 11.0 { br = 110.0  bg = 112.0  bb = 120.0 }
     r = int(br * sh)  g = int(bg * sh)  b = int(bb * sh)
 }
 
 func build_chunk(cx, cz) (model) {
-    ox := float(cx) * CHUNK()
-    oz := float(cz) * CHUNK()
-    n := CELLS()
-    step := CHUNK() / float(n)
+    ox := float(cx) * CHUNK()  oz := float(cz) * CHUNK()
+    n := CELLS()  step := CHUNK() / float(n)
     vcount := n * n * 6
-    vbuf := alloc(vcount * 12)
-    cbuf := alloc(vcount * 4)
-
-    vi := 0
-    j := 0
+    vbuf := alloc(vcount * 12)  cbuf := alloc(vcount * 4)
+    vi := 0  j := 0
     while j < n {
         i := 0
         while i < n {
-            x0 := ox + float(i) * step
-            z0 := oz + float(j) * step
-            x1 := x0 + step
-            z1 := z0 + step
-            y00 := terrain_h(x0, z0)
-            y10 := terrain_h(x1, z0)
-            y11 := terrain_h(x1, z1)
-            y01 := terrain_h(x0, z1)
-
+            x0 := ox + float(i) * step  z0 := oz + float(j) * step
+            x1 := x0 + step  z1 := z0 + step
+            y00 := terrain_h(x0, z0)  y10 := terrain_h(x1, z0)
+            y11 := terrain_h(x1, z1)  y01 := terrain_h(x0, z1)
             ha1 := (y00 + y10 + y11) / 3.0
             r1, g1, b1 := shade_color(x0, y00, z0, x1, y10, z0, x1, y11, z1, ha1)
             vi = put_tri(vbuf, cbuf, vi, x0, y00, z0, x1, y10, z0, x1, y11, z1, r1, g1, b1)
-
             ha2 := (y00 + y11 + y01) / 3.0
             r2, g2, b2 := shade_color(x0, y00, z0, x1, y11, z1, x0, y01, z1, ha2)
             vi = put_tri(vbuf, cbuf, vi, x0, y00, z0, x1, y11, z1, x0, y01, z1, r2, g2, b2)
@@ -151,35 +135,106 @@ func build_chunk(cx, cz) (model) {
         }
         j = j + 1
     }
-
     mesh := Mesh{vcount, vcount / 3, vbuf, cbuf, 0, 0}
-    UploadMesh(mesh, false)             // raylib now owns vbuf/cbuf (freed on UnloadModel)
+    UploadMesh(mesh, false)
     model = LoadModelFromMesh(mesh)
 }
 
-// Blade-Runner towers: noise decides which sub-grid cells host a building and how
-// tall; drawn immediate (dark box + neon wireframe + a glowing cap).
+// ---- buildings: grimy grey opaque megastructures, 100+ procedural variants ----
+// a tower = a stack of setback boxes (grey, darker/grimier at the base), with
+// variety in segments, dimensions, grime tint, lit windows, antennas, and the odd
+// neon sign. Drawn immediate; deterministic from world position.
+
+func draw_building(bx, bz) {
+    if rnd(bx, bz, 1.0) < 0.42 { }    // density: ~58% of cells host a tower
+    else {
+        gh := terrain_h(bx, bz)
+        h0 := rnd(bx, bz, 2.0)
+        segs := 1 + int(rnd(bx, bz, 3.0) * 3.99)        // 1..4 stacked boxes
+        totalh := 14.0 + h0 * h0 * 78.0                 // squared -> a few very tall towers
+        w := 4.5 + rnd(bx, bz, 4.0) * 7.0
+        grey := 52.0 + rnd(bx, bz, 5.0) * 46.0          // 52..98
+        tint := rnd(bx, bz, 6.0)                        // pollution hue bias
+        segh := totalh / float(segs)
+        y := gh
+        s := 0
+        while s < segs {
+            cy := y + segh * 0.5
+            t := float(s) / float(segs)                 // 0 base .. ~1 top
+            grime := 0.5 + 0.5 * t                      // base darker (soot/pollution)
+            rr := int(grey * grime)
+            gg := int((grey - 6.0 * tint) * grime)
+            bb := int((grey - 11.0 + 7.0 * tint) * grime)
+            DrawCube(v3(bx, cy, bz), w, segh, w, col(rr, gg, bb))
+            DrawCubeWires(v3(bx, cy, bz), w, segh, w, col(int(float(rr) * 0.45), int(float(gg) * 0.45), int(float(bb) * 0.5)))
+            // a couple of lit windows (the lived-in look)
+            if rnd(bx, bz, 11.0 + float(s)) > 0.35 {
+                wy := y + segh * (0.3 + rnd(bx, bz, 12.0 + float(s)) * 0.5)
+                lc := col(250, 220, 150)
+                if rnd(bx, bz, 13.0) > 0.6 { lc = col(150, 220, 250) }
+                DrawCube(v3(bx + w * 0.5, wy, bz), 0.18, 0.9, w * 0.6, lc)
+            }
+            y = y + segh
+            w = w * (0.62 + rnd(bx, bz, 7.0 + float(s)) * 0.3)   // setback narrower
+            s = s + 1
+        }
+        // antenna mast + blinking beacon on tall towers
+        if h0 > 0.55 {
+            DrawCube(v3(bx, y + 5.0, bz), 0.4, 10.0, 0.4, col(90, 92, 100))
+            DrawCube(v3(bx, y + 10.0, bz), 1.0, 1.0, 1.0, neon(int(bx + bz * 3.0)))
+        }
+        // an occasional neon sign down one face
+        if rnd(bx, bz, 8.0) > 0.78 {
+            DrawCube(v3(bx, gh + totalh * 0.45, bz + w * 1.6), w * 0.9, totalh * 0.35, 0.3, neon(int(bx * 3.0 + bz)))
+        }
+    }
+}
+
 func draw_buildings(cx, cz) {
-    ox := float(cx) * CHUNK()
-    oz := float(cz) * CHUNK()
-    bpc := 5
-    bstep := CHUNK() / float(bpc)
+    ox := float(cx) * CHUNK()  oz := float(cz) * CHUNK()
+    bpc := 4  bstep := CHUNK() / float(bpc)
     i := 0
     while i < bpc {
         j := 0
         while j < bpc {
-            bx := ox + (float(i) + 0.5) * bstep
-            bz := oz + (float(j) + 0.5) * bstep
-            d := noise2(bx * 0.075, bz * 0.075)
-            if d > 0.22 {
-                gh := terrain_h(bx, bz)
-                bh := 9.0 + d * 60.0
-                bw := 4.0 + noise2(bx * 0.4 + 7.0, bz * 0.4) * 2.0
-                cyy := gh + bh * 0.5
-                nc := neon(cx * 7 + cz * 13 + i + j)
-                DrawCube(v3(bx, cyy, bz), bw, bh, bw, col(14, 12, 22))
-                DrawCubeWires(v3(bx, cyy, bz), bw, bh, bw, nc)
-                DrawCube(v3(bx, gh + bh + 0.7, bz), bw * 0.55, 1.4, bw * 0.55, nc)
+            draw_building(ox + (float(i) + 0.5) * bstep, oz + (float(j) + 0.5) * bstep)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ---- flora & fauna: scattered scrub, debris, and drifting drones ----
+
+func draw_scatter(cx, cz, t) {
+    ox := float(cx) * CHUNK()  oz := float(cz) * CHUNK()
+    g := 6  gs := CHUNK() / float(g)
+    i := 0
+    while i < g {
+        j := 0
+        while j < g {
+            px := ox + (float(i) + 0.5) * gs
+            pz := oz + (float(j) + 0.5) * gs
+            gh := terrain_h(px, pz)
+            kind := rnd(px, pz, 20.0)
+            // skip where a building likely stands (coarse check on the building grid)
+            if kind > 0.30 {
+                if kind < 0.55 {
+                    // scrub: a small dark-green tuft
+                    DrawCube(v3(px, gh + 0.6, pz), 0.8, 1.2, 0.8, col(34, 60, 34))
+                } else {
+                    if kind < 0.74 {
+                        // debris / rubble
+                        DrawCube(v3(px, gh + 0.4, pz), 1.4, 0.8, 1.0, col(60, 56, 50))
+                    } else {
+                        if kind > 0.93 {
+                            // fauna: a drone hovering + bobbing, with a neon eye
+                            bob := 6.0 + 2.0 * sin(t * 1.5 + px * 0.3)
+                            DrawCube(v3(px, gh + bob, pz), 1.2, 0.5, 1.2, col(40, 42, 48))
+                            DrawCube(v3(px, gh + bob, pz + 0.7), 0.4, 0.4, 0.4, neon(int(px + pz)))
+                        }
+                    }
+                }
             }
             j = j + 1
         }
@@ -187,85 +242,64 @@ func draw_buildings(cx, cz) {
     }
 }
 
-// is chunk (cx,cz) already loaded in some slot?
+// ---- chunk pool helpers ----
+
 func loaded_at(cused, ccx, ccz, cx, cz) (idx) {
-    idx = 0 - 1
-    s := 0
+    idx = 0 - 1  s := 0
     while s < MAXC() {
-        if cused[s] == 1 {
-            if ccx[s] == cx {
-                if ccz[s] == cz { idx = s }
-            }
-        }
+        if cused[s] == 1 { if ccx[s] == cx { if ccz[s] == cz { idx = s } } }
         s = s + 1
     }
 }
-
 func free_slot(cused) (idx) {
-    idx = 0 - 1
-    s := 0
-    while s < MAXC() {
-        if cused[s] == 0 {
-            if idx < 0 { idx = s }
-        }
-        s = s + 1
-    }
+    idx = 0 - 1  s := 0
+    while s < MAXC() { if cused[s] == 0 { if idx < 0 { idx = s } }  s = s + 1 }
 }
 
 func main() {
     InitWindow(WIN_W(), WIN_H(), "machin - cyberpunk planet")
     SetTargetFPS(60)
     DisableCursor()
+    rlDisableBackfaceCulling()
 
-    // chunk slot pool
-    cmodel := []Model{}
-    ccx := []int{}
-    ccz := []int{}
-    cused := []int{}
+    cmodel := []Model{}  ccx := []int{}  ccz := []int{}  cused := []int{}
     p := 0
     while p < MAXC() {
-        cmodel = append(cmodel, Model{})
-        ccx = append(ccx, 0)
-        ccz = append(ccz, 0)
-        cused = append(cused, 0)
+        cmodel = append(cmodel, Model{})  ccx = append(ccx, 0)  ccz = append(ccz, 0)  cused = append(cused, 0)
         p = p + 1
     }
 
-    camx := 0.0
-    camy := 34.0
-    camz := 0.0
-    yaw := 0.0
-    pitch := 0.0 - 0.32
+    camx := 0.0  camy := 36.0  camz := 0.0
+    yaw := 0.0  pitch := 0.0 - 0.30
+    t := 0.0
 
     while WindowShouldClose() == false {
-        // ---- fly camera (WASD + mouse) ----
+        dt := GetFrameTime()
+        t = t + dt
+
+        // ---- fly camera (mouse-look + WASD, read every frame so both work together) ----
         md := GetMouseDelta()
         yaw = yaw + md.x * 0.0026
         pitch = clampf(pitch - md.y * 0.0026, 0.0 - 1.45, 1.45)
         cp := cos(pitch)
-        fx := cp * sin(yaw)
-        fy := sin(pitch)
-        fz := cp * cos(yaw)
+        fx := cp * sin(yaw)  fy := sin(pitch)  fz := cp * cos(yaw)
         rl := sqrt(fx * fx + fz * fz) + 0.0001
-        rx := 0.0 - fz / rl
-        rz := fx / rl
+        rx := 0.0 - fz / rl  rz := fx / rl
 
-        dt := GetFrameTime()
-        sp := 38.0
-        if IsKeyDown(340) { sp = 105.0 }    // Left Shift: boost
+        sp := 40.0
+        if IsKeyDown(340) { sp = 115.0 }
         mv := sp * dt
-        if IsKeyDown(87) { camx = camx + fx * mv  camy = camy + fy * mv  camz = camz + fz * mv }   // W
-        if IsKeyDown(83) { camx = camx - fx * mv  camy = camy - fy * mv  camz = camz - fz * mv }   // S
-        if IsKeyDown(68) { camx = camx + rx * mv  camz = camz + rz * mv }                          // D
-        if IsKeyDown(65) { camx = camx - rx * mv  camz = camz - rz * mv }                          // A
-        if IsKeyDown(32) { camy = camy + mv }     // Space: up
-        if IsKeyDown(341) { camy = camy - mv }    // Left Ctrl: down
+        if IsKeyDown(87) { camx = camx + fx * mv  camy = camy + fy * mv  camz = camz + fz * mv }
+        if IsKeyDown(83) { camx = camx - fx * mv  camy = camy - fy * mv  camz = camz - fz * mv }
+        if IsKeyDown(68) { camx = camx + rx * mv  camz = camz + rz * mv }
+        if IsKeyDown(65) { camx = camx - rx * mv  camz = camz - rz * mv }
+        if IsKeyDown(32) { camy = camy + mv }
+        if IsKeyDown(341) { camy = camy - mv }
 
-        // ---- stream chunks around the camera ----
+        // ---- stream chunks (unload out of range; build in-range, budgeted per frame) ----
         camcx := int(floor(camx / CHUNK()))
         camcz := int(floor(camz / CHUNK()))
         r := RAD()
-        // unload chunks that drifted out of range
         s := 0
         while s < MAXC() {
             if cused[s] == 1 {
@@ -274,20 +308,20 @@ func main() {
             }
             s = s + 1
         }
-        // load any in-range chunk not yet present
+        built := 0
         dz := 0 - r
         while dz <= r {
             dx := 0 - r
             while dx <= r {
-                cx := camcx + dx
-                cz := camcz + dz
-                if loaded_at(cused, ccx, ccz, cx, cz) < 0 {
-                    slot := free_slot(cused)
-                    if slot >= 0 {
-                        cmodel[slot] = build_chunk(cx, cz)
-                        ccx[slot] = cx
-                        ccz[slot] = cz
-                        cused[slot] = 1
+                if built < BUDGET() {
+                    cx := camcx + dx  cz := camcz + dz
+                    if loaded_at(cused, ccx, ccz, cx, cz) < 0 {
+                        slot := free_slot(cused)
+                        if slot >= 0 {
+                            cmodel[slot] = build_chunk(cx, cz)
+                            ccx[slot] = cx  ccz[slot] = cz  cused[slot] = 1
+                            built = built + 1
+                        }
                     }
                 }
                 dx = dx + 1
@@ -299,21 +333,22 @@ func main() {
 
         // ---- render ----
         BeginDrawing()
-        ClearBackground(col(8, 7, 16))
-        DrawRectangleGradientV(0, 0, WIN_W(), WIN_H(), col(20, 11, 34), col(78, 38, 42))   // Blade Runner haze
+        ClearBackground(col(9, 8, 15))
+        DrawRectangleGradientV(0, 0, WIN_W(), WIN_H(), col(22, 12, 36), col(86, 44, 46))
         BeginMode3D(cam)
         s = 0
         while s < MAXC() {
             if cused[s] == 1 {
                 DrawModel(cmodel[s], v3(0.0, 0.0, 0.0), 1.0, white())
                 draw_buildings(ccx[s], ccz[s])
+                draw_scatter(ccx[s], ccz[s], t)
             }
             s = s + 1
         }
         EndMode3D()
 
         DrawText("machin - cyberpunk planet", 18, 14, 24, col(90, 240, 240))
-        DrawText("WASD + mouse to fly  ·  Space/Ctrl up/down  ·  Shift boost  ·  infinite noise terrain", 18, 44, 16, col(210, 120, 200))
+        DrawText("WASD + mouse to fly  ·  Space/Ctrl up/down  ·  Shift boost  ·  infinite noise world", 18, 44, 16, col(210, 120, 200))
         EndDrawing()
     }
 
