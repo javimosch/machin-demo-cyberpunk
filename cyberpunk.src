@@ -25,6 +25,7 @@ extern "raylib" {
     cstruct RenderTexture2D { id u32 texture Texture2D depth Texture2D }
     cstruct Shader { id u32 locs ptr }
     cstruct Material { shader Shader maps ptr }
+    cstruct Matrix { m0 f32 m4 f32 m8 f32 m12 f32 m1 f32 m5 f32 m9 f32 m13 f32 m2 f32 m6 f32 m10 f32 m14 f32 m3 f32 m7 f32 m11 f32 m15 f32 }
     fn InitWindow(i32, i32, string)
     fn SetTargetFPS(i32)
     fn WindowShouldClose() bool
@@ -61,8 +62,16 @@ extern "raylib" {
     fn CloseWindow()
 }
 
-// rlgl: the terrain surface is seen from above and below, so don't cull it
-extern "rlgl" { fn rlDisableBackfaceCulling() }
+// rlgl: cull toggle, the matrix stack (for skeletal creatures), and a custom
+// projection matrix (to push the far clip plane out to 10 km).
+extern "rlgl" {
+    fn rlDisableBackfaceCulling()
+    fn rlPushMatrix()
+    fn rlPopMatrix()
+    fn rlTranslatef(f32, f32, f32)
+    fn rlRotatef(f32, f32, f32, f32)
+    fn rlSetMatrixProjection(Matrix)
+}
 
 func WIN_W() (n) { n = 1120 }
 func WIN_H() (n) { n = 680 }
@@ -74,6 +83,24 @@ func BUDGET() (n) { n = 4 }        // max chunk meshes built per frame (keeps mo
 func MAXP() (n) { n = 4200 }       // max instanced plants per frame
 func PRAD() (n) { n = 26 }         // plant grid radius (cells)
 func PSP() (n) { n = 4.5 }         // plant grid spacing
+func FAR() (n) { n = 10000.0 }     // far clip plane (~10 km draw distance)
+func CGRID() (n) { n = 64 }        // coarse distant-terrain mesh resolution
+func CSPAN() (n) { n = 18000.0 }   // coarse mesh extent (±9 km around the camera)
+func NCREAT() (n) { n = 16 }       // wandering skeletal creatures
+
+// a perspective projection with a 10 km far plane (installed via
+// rlSetMatrixProjection to override raylib's default 1000-unit far clip).
+// Fields follow raylib's Matrix order: m0 m4 m8 m12 / m1 m5 m9 m13 / ...
+func build_proj() (pm) {
+    fov := 66.0 * 3.14159265 / 180.0
+    f := 1.0 / tan(fov * 0.5)
+    asp := float(WIN_W()) / float(WIN_H())
+    near := 0.5
+    far := FAR()
+    m10 := 0.0 - (far + near) / (far - near)
+    m14 := 0.0 - (2.0 * far * near) / (far - near)
+    pm = Matrix{f / asp, 0.0, 0.0, 0.0,  0.0, f, 0.0, 0.0,  0.0, 0.0, m10, m14,  0.0, 0.0, 0.0 - 1.0, 0.0}
+}
 
 func col(r, g, b) (c) { c = Color{r, g, b, 255} }
 func white() (c) { c = Color{255, 255, 255, 255} }
@@ -83,7 +110,7 @@ func VS() (s) { s = "#version 330\nin vec3 vertexPosition;\nin vec2 vertexTexCoo
 
 // cyberpunk post-process: depth fog into the haze (skipping the sky), chromatic
 // aberration, a blue lift, scanlines, and a vignette.
-func FS() (s) { s = "#version 330\nin vec2 fragTexCoord;\nout vec4 finalColor;\nuniform sampler2D texture0;\nuniform sampler2D depthTex;\nuniform vec2 resolution;\nuniform float nearp;\nuniform float farp;\nuniform vec3 fogColor;\nvoid main(){\nvec2 uv=fragTexCoord;\nvec2 dd=uv-0.5;\nfloat ca=0.0022;\nvec3 c;\nc.r=texture(texture0,uv+dd*ca).r;\nc.g=texture(texture0,uv).g;\nc.b=texture(texture0,uv-dd*ca).b;\nfloat dep=texture(depthTex,uv).r;\nfloat z=dep*2.0-1.0;\nfloat lin=(2.0*nearp*farp)/(farp+nearp-z*(farp-nearp));\nfloat fog=clamp((lin-50.0)/230.0,0.0,1.0);\nif(dep>0.9995)fog=0.0;\nc=mix(c,fogColor,fog*fog);\nc.b+=0.03;\nc=pow(max(c,vec3(0.0)),vec3(0.92));\nc*=0.90+0.10*sin(uv.y*resolution.y*1.4);\nc*=mix(0.5,1.0,smoothstep(0.95,0.25,length(dd)));\nfinalColor=vec4(c,1.0);\n}" }
+func FS() (s) { s = "#version 330\nin vec2 fragTexCoord;\nout vec4 finalColor;\nuniform sampler2D texture0;\nuniform sampler2D depthTex;\nuniform vec2 resolution;\nuniform float nearp;\nuniform float farp;\nuniform vec3 fogColor;\nvoid main(){\nvec2 uv=fragTexCoord;\nvec2 dd=uv-0.5;\nfloat ca=0.0022;\nvec3 c;\nc.r=texture(texture0,uv+dd*ca).r;\nc.g=texture(texture0,uv).g;\nc.b=texture(texture0,uv-dd*ca).b;\nfloat dep=texture(depthTex,uv).r;\nfloat z=dep*2.0-1.0;\nfloat lin=(2.0*nearp*farp)/(farp+nearp-z*(farp-nearp));\nfloat fog=clamp((lin-180.0)/6800.0,0.0,1.0);\nif(dep>0.9995)fog=0.0;\nc=mix(c,fogColor,fog*fog);\nc.b+=0.03;\nc=pow(max(c,vec3(0.0)),vec3(0.92));\nc*=0.90+0.10*sin(uv.y*resolution.y*1.4);\nc*=mix(0.5,1.0,smoothstep(0.95,0.25,length(dd)));\nfinalColor=vec4(c,1.0);\n}" }
 
 // GPU-instancing shaders: the vertex shader reads a per-instance mat4 attribute
 func IVS() (s) { s = "#version 330\nin vec3 vertexPosition;\nin vec4 vertexColor;\nin mat4 instanceTransform;\nout vec4 fragColor;\nuniform mat4 mvp;\nvoid main(){fragColor=vertexColor;gl_Position=mvp*instanceTransform*vec4(vertexPosition,1.0);}" }
@@ -328,6 +355,76 @@ func draw_scatter(cx, cz, t) {
     }
 }
 
+// ---- distant terrain: one big low-res mesh, recentered on the camera, for the
+// ---- 10 km horizon (sits slightly below the fine chunks; the fog hides the seam)
+
+func build_coarse(cenx, cenz) (model) {
+    n := CGRID()  span := CSPAN()  step := span / float(n)  half := span * 0.5
+    vcount := n * n * 6
+    vbuf := alloc(vcount * 12)  cbuf := alloc(vcount * 4)
+    vi := 0  j := 0
+    while j < n {
+        i := 0
+        while i < n {
+            x0 := cenx - half + float(i) * step  z0 := cenz - half + float(j) * step
+            x1 := x0 + step  z1 := z0 + step
+            y00 := terrain_h(x0, z0) - 2.0  y10 := terrain_h(x1, z0) - 2.0
+            y11 := terrain_h(x1, z1) - 2.0  y01 := terrain_h(x0, z1) - 2.0
+            ha1 := (y00 + y10 + y11) / 3.0
+            r1, g1, b1 := shade_color(x0, y00, z0, x1, y10, z0, x1, y11, z1, ha1)
+            vi = put_tri(vbuf, cbuf, vi, x0, y00, z0, x1, y10, z0, x1, y11, z1, r1, g1, b1)
+            ha2 := (y00 + y11 + y01) / 3.0
+            r2, g2, b2 := shade_color(x0, y00, z0, x1, y11, z1, x0, y01, z1, ha2)
+            vi = put_tri(vbuf, cbuf, vi, x0, y00, z0, x1, y11, z1, x0, y01, z1, r2, g2, b2)
+            i = i + 1
+        }
+        j = j + 1
+    }
+    mesh := Mesh{vcount, vcount / 3, vbuf, cbuf, 0, 0}
+    UploadMesh(mesh, false)
+    model = LoadModelFromMesh(mesh)
+}
+
+// ---- procedural skeletal creatures (mechanical quad-walkers) via the rlgl matrix
+// ---- stack: a forward-kinematics skeleton with a sine-driven diagonal gait
+
+func draw_leg(hx, hy, hz, swing, lift) {
+    rlPushMatrix()
+    rlTranslatef(hx, hy, hz)
+    rlRotatef(swing, 1.0, 0.0, 0.0)
+    DrawCube(v3(0.0, 0.0 - 0.6, 0.0), 0.28, 1.2, 0.28, col(74, 76, 84))
+    DrawCubeWires(v3(0.0, 0.0 - 0.6, 0.0), 0.28, 1.2, 0.28, col(28, 30, 38))
+    rlTranslatef(0.0, 0.0 - 1.2, 0.0)
+    rlRotatef(0.0 - (18.0 + lift * 42.0), 1.0, 0.0, 0.0)
+    DrawCube(v3(0.0, 0.0 - 0.5, 0.0), 0.22, 1.0, 0.22, col(58, 60, 70))
+    rlPopMatrix()
+}
+
+func draw_creature(px, py, pz, hd, t) {
+    sp := 7.0
+    rlPushMatrix()
+    rlTranslatef(px, py, pz)
+    rlRotatef(hd, 0.0, 1.0, 0.0)
+    bob := 0.16 * sin(t * sp * 2.0)
+    DrawCube(v3(0.0, 1.7 + bob, 0.0), 1.1, 0.7, 2.1, col(58, 60, 68))
+    DrawCubeWires(v3(0.0, 1.7 + bob, 0.0), 1.1, 0.7, 2.1, col(26, 28, 36))
+    DrawCube(v3(0.0, 1.8 + bob, 1.35), 0.6, 0.5, 0.6, col(68, 70, 78))
+    DrawCube(v3(0.0, 1.86 + bob, 1.66), 0.26, 0.26, 0.18, col(255, 55, 80))
+    a := t * sp
+    s0 := sin(a) * 26.0
+    l0 := 0.0
+    if cos(a) > 0.0 { l0 = cos(a) }
+    s1 := sin(a + 3.14159) * 26.0
+    l1 := 0.0
+    if cos(a + 3.14159) > 0.0 { l1 = cos(a + 3.14159) }
+    hy := 1.45 + bob
+    draw_leg(0.0 - 0.6, hy, 0.85, s0, l0)
+    draw_leg(0.6, hy, 0.85, s1, l1)
+    draw_leg(0.0 - 0.6, hy, 0.0 - 0.85, s1, l1)
+    draw_leg(0.6, hy, 0.0 - 0.85, s0, l0)
+    rlPopMatrix()
+}
+
 // ---- chunk pool helpers ----
 
 func loaded_at(cused, ccx, ccz, cx, cz) (idx) {
@@ -353,8 +450,8 @@ func main() {
     sh := LoadShaderFromMemory(VS(), FS())
     locDepth := GetShaderLocation(sh, "depthTex")
     set_uniform(sh, GetShaderLocation(sh, "resolution"), float(WIN_W()), float(WIN_H()), 0.0, 1)
-    set_uniform(sh, GetShaderLocation(sh, "nearp"), 0.01, 0.0, 0.0, 0)
-    set_uniform(sh, GetShaderLocation(sh, "farp"), 1000.0, 0.0, 0.0, 0)
+    set_uniform(sh, GetShaderLocation(sh, "nearp"), 0.5, 0.0, 0.0, 0)
+    set_uniform(sh, GetShaderLocation(sh, "farp"), FAR(), 0.0, 0.0, 0)
     set_uniform(sh, GetShaderLocation(sh, "fogColor"), 0.32, 0.18, 0.22, 2)
     rt := LoadRenderTexture(WIN_W(), WIN_H())
 
@@ -366,6 +463,26 @@ func main() {
     matdef := LoadMaterialDefault()
     imat := Material{ish, matdef.maps}
     tbuf := alloc(MAXP() * 64)
+
+    // custom projection with a 10 km far plane (raylib's default clips ~1 km).
+    pm := build_proj()
+
+    // distant low-res terrain underlay, rebuilt when the camera drifts a snap cell.
+    csnap := 1000.0
+    coarse := build_coarse(0.0, 0.0)
+    ccsx := 0.0  ccsz := 0.0  chave := 1
+
+    // a small herd of skeletal walkers roaming near the origin.
+    crx := []float{}  crz := []float{}  crh := []float{}  crph := []float{}
+    k := 0
+    while k < NCREAT() {
+        ang := float(k) * 0.6
+        crx = append(crx, sin(ang) * (60.0 + float(k) * 9.0))
+        crz = append(crz, cos(ang) * (60.0 + float(k) * 9.0))
+        crh = append(crh, ang)
+        crph = append(crph, float(k) * 0.7)
+        k = k + 1
+    }
 
     cmodel := []Model{}  ccx := []int{}  ccz := []int{}  cused := []int{}
     p := 0
@@ -434,6 +551,28 @@ func main() {
             dz = dz + 1
         }
 
+        // rebuild the distant underlay when the camera has drifted a snap cell.
+        if fabs(camx - ccsx) > csnap { chave = 0 }
+        if fabs(camz - ccsz) > csnap { chave = 0 }
+        if chave == 0 {
+            UnloadModel(coarse)
+            scx := floor(camx / csnap) * csnap
+            scz := floor(camz / csnap) * csnap
+            coarse = build_coarse(scx, scz)
+            ccsx = scx  ccsz = scz  chave = 1
+        }
+
+        // ---- walk the herd: each creature strides forward, turns lazily, hugs ground ----
+        k = 0
+        while k < NCREAT() {
+            hd := crh[k]
+            spd := 6.0
+            crx[k] = crx[k] + sin(hd) * spd * dt
+            crz[k] = crz[k] + cos(hd) * spd * dt
+            crh[k] = hd + sin(t * 0.3 + crph[k]) * 0.5 * dt
+            k = k + 1
+        }
+
         cam := Camera3D{v3(camx, camy, camz), v3(camx + fx, camy + fy, camz + fz), v3(0.0, 1.0, 0.0), 66.0, 0}
 
         // ---- render the world into the off-screen target ----
@@ -441,6 +580,8 @@ func main() {
         ClearBackground(col(9, 8, 15))
         DrawRectangleGradientV(0, 0, WIN_W(), WIN_H(), col(22, 12, 36), col(86, 44, 46))
         BeginMode3D(cam)
+        rlSetMatrixProjection(pm)   // override raylib's 1 km far plane → 10 km horizon
+        DrawModel(coarse, v3(0.0, 0.0, 0.0), 1.0, white())
         s = 0
         while s < MAXC() {
             if cused[s] == 1 {
@@ -452,6 +593,12 @@ func main() {
         }
         np := fill_flora(tbuf, camx, camz)
         DrawMeshInstanced(plant, imat, tbuf, np)   // thousands of plants in one draw call
+        k = 0
+        while k < NCREAT() {
+            cy := terrain_h(crx[k], crz[k])
+            draw_creature(crx[k], cy, crz[k], crh[k] * 57.2958, t + crph[k])
+            k = k + 1
+        }
         EndMode3D()
         EndTextureMode()
 

@@ -30,6 +30,8 @@ This is the dogfood that drove machin's **`noise`** builtins (v0.49.0) — and i
 - **Fly camera:** a `Camera3D` (nested cstruct, v0.45) driven by `GetMouseDelta` + `IsKeyDown` + `GetFrameTime`, with forward/right vectors from native `sin`/`cos` (v0.46).
 - **Buildings:** grimy **grey opaque megastructures** — Blade-Runner style. A per-cell quasi-random hash (`noise2` at high frequency) drives **100+ procedural variants**: 1–4 stacked setback boxes, varied widths/heights, a grey palette that darkens toward the base (soot/pollution), lit windows, antenna masts with blinking beacons, and the odd neon sign. (Surfaces are flat-shaded, not UV-textured — true textures want a material/shader pass.)
 - **Flora — real GPU instancing.** Thousands of plants (a small mesh) are drawn in a **single `DrawMeshInstanced` call** with a custom instancing shader (`in mat4 instanceTransform`), their transform matrices built in raw memory each frame from noise-placed, terrain-snapped positions. Buildings cluster in **city districts** (low-frequency noise); the open scrubland between them is where the flora shows. Plus drifting bob-animated **drones** with neon eyes (immediate).
+- **Fauna — procedural skeletal creatures.** A herd of mechanical quad-walkers roams the wasteland, each a **forward-kinematics skeleton** posed every frame through the rlgl **matrix stack** (`rlPushMatrix`/`rlTranslatef`/`rlRotatef`/`rlPopMatrix`): a torso + head over four two-segment legs whose hip and knee joints swing from `sin`/`cos` in a **diagonal gait** (a sine-driven body bob to match). The creatures stride forward and turn lazily, snapping to terrain height — no skinned mesh, just nested transforms over `DrawCube`.
+- **10 km draw distance.** raylib's default perspective clips the world at ~1 km; the demo installs a **custom projection matrix** (`rlSetMatrixProjection`, a 16-float `Matrix` cstruct built with a 10 000-unit far plane) and lays down a **coarse low-res terrain underlay** — one big mesh recentered on the camera as it drifts — so the horizon recedes for kilometers, the fine chunks blending into it through the fog.
 - **Atmosphere — a real shader.** The whole 3D scene renders into an off-screen `RenderTexture`, then composites to the screen through a **fragment shader** (`LoadShaderFromMemory`) that does **depth fog** — distant towers dissolve into the haze (sampling the render target's depth buffer, linearized; the sky is skipped) — plus chromatic aberration, a blue lift, scanlines, and a vignette. A dark `ClearBackground` + `DrawRectangleGradientV` set the purple→orange sky behind it.
 - **Smooth streaming:** chunk meshes are built at most a few per frame (a budget) so flying never hitches — mouse-look and WASD stay responsive while the world regenerates around you.
 
@@ -48,7 +50,7 @@ Needs the `machin` compiler (**v0.49.0+**), a C compiler, **raylib**, a display,
 
 ## Tuning
 
-In `cyberpunk.src`: `CHUNK`/`CELLS` (chunk size & mesh resolution), `RAD` (view distance in chunks), `terrain_h` (the noise field), `draw_buildings` (density/height/neon), the haze colors in `main`. See [`SKILL.md`](SKILL.md).
+In `cyberpunk.src`: `CHUNK`/`CELLS` (chunk size & mesh resolution), `RAD` (view distance in chunks), `FAR` (far clip / draw distance), `CGRID`/`CSPAN` (distant-underlay resolution & extent), `NCREAT` (herd size), `terrain_h` (the noise field), `draw_buildings` (density/height/neon), `draw_creature` (the skeleton & gait), the haze colors in `main`. See [`SKILL.md`](SKILL.md).
 
 ## License
 
