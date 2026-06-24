@@ -1,4 +1,4 @@
-# machin-demo-cyberpunk
+# machin-game-demo-cyberpunk
 
 An **infinite procedural planet you fly through** — written in **[machin](https://github.com/javimosch/machin)** (MFL), rendered with raylib. WASD + mouse to free-fly over endless noise-generated wasteland, with **Blade-Runner-style neon megastructures** rising out of a hazy sky. The terrain **streams in chunks** around you and regenerates forever as you move.
 
@@ -42,8 +42,8 @@ No assets, no engine — the planet *is* the program. It's the Tier-3 ("procedur
 Needs the `machin` compiler (**v0.49.0+**), a C compiler, **raylib**, a display, and a mouse. A GUI binary links the system graphics stack, so it is **not** a no-dependency binary.
 
 ```bash
-./build.sh            # → ./machin-demo-cyberpunk
-./machin-demo-cyberpunk
+./build.sh            # → ./machin-game-demo-cyberpunk
+./machin-game-demo-cyberpunk
 ```
 
 `build.sh` uses a **system raylib** if installed; otherwise it **vendors raylib's prebuilt static release** into `vendor/` automatically — no root required.

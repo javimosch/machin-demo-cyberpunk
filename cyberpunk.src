@@ -1,9 +1,9 @@
-// machin-demo-cyberpunk — an INFINITE procedural planet you fly through, written
+// machin-game-demo-cyberpunk — an INFINITE procedural planet you fly through, written
 // in machin (MFL) and rendered with raylib. WASD + mouse to fly; the terrain
 // streams in chunks around you — endless noise wasteland under a hazy sky, packed
 // with grimy Blade-Runner megastructures, scattered scrub and drifting drones.
 //
-//   ./build.sh && ./machin-demo-cyberpunk
+//   ./build.sh && ./machin-game-demo-cyberpunk
 //   WASD + mouse to fly · Space/Ctrl = up/down · Shift = boost · Esc = quit
 //
 // Dogfood for machin's `noise` builtins (v0.49.0): terrain, building shapes, and

@@ -1,9 +1,9 @@
 ---
-name: machin-demo-cyberpunk
-description: Build, run, and modify machin-demo-cyberpunk — an infinite, chunk-streamed procedural planet (noise terrain + Blade-Runner neon buildings) you fly through, written in machin (MFL) via raylib. Use when working on this repo, or as the worked example of the noise builtins, infinite chunk streaming, a fly camera, and GPU-mesh terrain composed together.
+name: machin-game-demo-cyberpunk
+description: Build, run, and modify machin-game-demo-cyberpunk — an infinite, chunk-streamed procedural planet (noise terrain + Blade-Runner neon buildings) you fly through, written in machin (MFL) via raylib. Use when working on this repo, or as the worked example of the noise builtins, infinite chunk streaming, a fly camera, and GPU-mesh terrain composed together.
 ---
 
-# machin-demo-cyberpunk
+# machin-game-demo-cyberpunk
 
 An infinite procedural planet you free-fly through: noise-generated wasteland terrain that streams in chunks, with Blade-Runner neon megastructures and a hazy sky. The capstone game-dev demo — it composes the whole stack.
 
@@ -13,7 +13,7 @@ An infinite procedural planet you free-fly through: noise-generated wasteland te
 
 ```bash
 ./build.sh                 # machin encode cyberpunk.src -> cyberpunk.mfl, then machin build
-./machin-demo-cyberpunk     # WASD + mouse to fly; Space/Ctrl up/down; Shift boost; Esc quit
+./machin-game-demo-cyberpunk     # WASD + mouse to fly; Space/Ctrl up/down; Shift boost; Esc quit
 ```
 
 Needs `machin` **v0.49.0+** (noise), a C compiler, **raylib**, a display, and a mouse.

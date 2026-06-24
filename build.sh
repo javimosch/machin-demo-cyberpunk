@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build machin-demo-cyberpunk. Uses a system raylib if installed; otherwise
+# Build machin-game-demo-cyberpunk. Uses a system raylib if installed; otherwise
 # vendors raylib's prebuilt static release into vendor/ (no root). The committed
 # source stays system-style; the vendored path is injected into a throwaway copy.
 # Requires machin v0.49.0+ (noise2/noise3) and the pointer/array FFI (v0.47-0.48).
@@ -33,5 +33,5 @@ else
     mv "$tmp" cyberpunk.mfl
 fi
 
-"$MACHIN" build cyberpunk.mfl -o machin-demo-cyberpunk
-echo "built ./machin-demo-cyberpunk"
+"$MACHIN" build cyberpunk.mfl -o machin-game-demo-cyberpunk
+echo "built ./machin-game-demo-cyberpunk"
