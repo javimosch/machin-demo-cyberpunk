@@ -27,7 +27,17 @@ Needs `machin` **v0.49.0+** (noise), a C compiler, **raylib**, a display, and a 
 | **GPU mesh per chunk** | `alloc`/`poke_f32`/`poke_u8` vertex+color arrays → `cstruct Mesh` → `UploadMesh(mesh, false)` → `LoadModelFromMesh` → `DrawModel`; `UnloadModel` on eviction |
 | **fly camera** | `Camera3D` from `GetMouseDelta` (yaw/pitch) + `IsKeyDown` (WASD/Space/Ctrl/Shift) + `GetFrameTime`; forward/right via `sin`/`cos` |
 | **buildings** | per chunk, `noise2` gates which sub-grid cells host a tower + its height; immediate `DrawCube` (dark) + `DrawCubeWires` (neon) + a glowing cap |
-| **atmosphere** | `ClearBackground` (near-black) + `DrawRectangleGradientV` haze (purple→orange) drawn before `BeginMode3D`; cycling neon hues |
+| **atmosphere** | a **post-process shader**: render the scene to a `RenderTexture`, composite to screen through a fragment shader doing **depth fog** + chromatic aberration + scanlines + vignette; `DrawRectangleGradientV` sky behind |
+
+## Shaders (post-processing) — all composition, no new machin feature
+
+raylib's shader system is reachable with the existing FFI: `Shader` is `{id u32, locs ptr}` (a pointer cstruct field, v0.48), `RenderTexture2D` is `{id u32, texture Texture2D, depth Texture2D}` (nested cstructs, v0.45), and `LoadShaderFromMemory(vs, fs)`/`SetShaderValue(..., ptr, kind)`/`SetShaderValueTexture` are plain FFI (strings + `ptr` + scalars).
+
+The post-process loop:
+1. `BeginTextureMode(rt)` → clear → sky gradient → `BeginMode3D` → world → `EndMode3D` → `EndTextureMode`.
+2. `SetShaderValueTexture(sh, locDepth, rt.depth)` (bind the depth attachment), `BeginShaderMode(sh)`, `DrawTextureRec(rt.texture, Rectangle{0,0, W, -H}, ...)` (the **negative height flips** the upside-down render target), `EndShaderMode`, then the HUD.
+
+GLSL is passed as MFL strings (`\n`-escaped, single line — a literal newline would break the one-decl-per-line source). The VS is the standard raylib passthrough (`vertexPosition`/`vertexTexCoord`/`vertexColor`/`mvp`); the FS samples `texture0` (auto-bound by `DrawTextureRec`) + `depthTex` (set explicitly). **Depth fog:** linearize `texture(depthTex,uv).r` with the camera near/far (0.01/1000), fog by distance, and **skip pixels with `depth > 0.9995`** (the cleared sky) so the gradient shows through. Set scalar/vec uniforms once from a small `alloc`'d buffer (`SHADER_UNIFORM_FLOAT=0`, `VEC2=1`, `VEC3=2`). The same path enables real GPU instancing (an instancing VS) and textured materials — the rest of the shader frontier.
 
 ## Patterns worth copying
 

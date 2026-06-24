@@ -20,6 +20,10 @@ extern "raylib" {
     cstruct Camera3D { position Vector3 target Vector3 up Vector3 fovy f32 projection i32 }
     cstruct Model {}
     cstruct Mesh { vertexCount i32 triangleCount i32 vertices ptr colors ptr vaoId u32 vboId ptr }
+    cstruct Rectangle { x f32 y f32 width f32 height f32 }
+    cstruct Texture2D { id u32 width i32 height i32 mipmaps i32 format i32 }
+    cstruct RenderTexture2D { id u32 texture Texture2D depth Texture2D }
+    cstruct Shader { id u32 locs ptr }
     fn InitWindow(i32, i32, string)
     fn SetTargetFPS(i32)
     fn WindowShouldClose() bool
@@ -40,6 +44,16 @@ extern "raylib" {
     fn GetFrameTime() float
     fn UploadMesh(Mesh*, bool)
     fn LoadModelFromMesh(Mesh) Model
+    fn LoadShaderFromMemory(string, string) Shader
+    fn GetShaderLocation(Shader, string) i32
+    fn SetShaderValue(Shader, i32, ptr, i32)
+    fn SetShaderValueTexture(Shader, i32, Texture2D)
+    fn LoadRenderTexture(i32, i32) RenderTexture2D
+    fn BeginTextureMode(RenderTexture2D)
+    fn EndTextureMode()
+    fn BeginShaderMode(Shader)
+    fn EndShaderMode()
+    fn DrawTextureRec(Texture2D, Rectangle, Vector2, Color)
     fn CloseWindow()
 }
 
@@ -56,6 +70,22 @@ func BUDGET() (n) { n = 4 }        // max chunk meshes built per frame (keeps mo
 
 func col(r, g, b) (c) { c = Color{r, g, b, 255} }
 func white() (c) { c = Color{255, 255, 255, 255} }
+
+// the standard raylib passthrough vertex shader (for the fullscreen post pass)
+func VS() (s) { s = "#version 330\nin vec3 vertexPosition;\nin vec2 vertexTexCoord;\nin vec4 vertexColor;\nout vec2 fragTexCoord;\nout vec4 fragColor;\nuniform mat4 mvp;\nvoid main(){fragTexCoord=vertexTexCoord;fragColor=vertexColor;gl_Position=mvp*vec4(vertexPosition,1.0);}" }
+
+// cyberpunk post-process: depth fog into the haze (skipping the sky), chromatic
+// aberration, a blue lift, scanlines, and a vignette.
+func FS() (s) { s = "#version 330\nin vec2 fragTexCoord;\nout vec4 finalColor;\nuniform sampler2D texture0;\nuniform sampler2D depthTex;\nuniform vec2 resolution;\nuniform float nearp;\nuniform float farp;\nuniform vec3 fogColor;\nvoid main(){\nvec2 uv=fragTexCoord;\nvec2 dd=uv-0.5;\nfloat ca=0.0022;\nvec3 c;\nc.r=texture(texture0,uv+dd*ca).r;\nc.g=texture(texture0,uv).g;\nc.b=texture(texture0,uv-dd*ca).b;\nfloat dep=texture(depthTex,uv).r;\nfloat z=dep*2.0-1.0;\nfloat lin=(2.0*nearp*farp)/(farp+nearp-z*(farp-nearp));\nfloat fog=clamp((lin-50.0)/230.0,0.0,1.0);\nif(dep>0.9995)fog=0.0;\nc=mix(c,fogColor,fog*fog);\nc.b+=0.03;\nc=pow(max(c,vec3(0.0)),vec3(0.92));\nc*=0.90+0.10*sin(uv.y*resolution.y*1.4);\nc*=mix(0.5,1.0,smoothstep(0.95,0.25,length(dd)));\nfinalColor=vec4(c,1.0);\n}" }
+
+// set a uniform from a small raw buffer (kind: 0 float, 1 vec2, 2 vec3)
+func set_uniform(sh, loc, a, b, c, kind) {
+    buf := alloc(12)
+    poke_f32(buf, 0, a)
+    poke_f32(buf, 4, b)
+    poke_f32(buf, 8, c)
+    SetShaderValue(sh, loc, buf, kind)
+}
 func v3(x, y, z) (v) { v = Vector3{x, y, z} }
 func clampf(v, lo, hi) (o) { o = v  if o < lo { o = lo }  if o > hi { o = hi } }
 func iabs(n) (r) { r = n  if n < 0 { r = 0 - n } }
@@ -262,6 +292,16 @@ func main() {
     DisableCursor()
     rlDisableBackfaceCulling()
 
+    // post-processing: render the world into an off-screen target, then composite
+    // it through a fragment shader (depth fog into the haze + cyberpunk grade).
+    sh := LoadShaderFromMemory(VS(), FS())
+    locDepth := GetShaderLocation(sh, "depthTex")
+    set_uniform(sh, GetShaderLocation(sh, "resolution"), float(WIN_W()), float(WIN_H()), 0.0, 1)
+    set_uniform(sh, GetShaderLocation(sh, "nearp"), 0.01, 0.0, 0.0, 0)
+    set_uniform(sh, GetShaderLocation(sh, "farp"), 1000.0, 0.0, 0.0, 0)
+    set_uniform(sh, GetShaderLocation(sh, "fogColor"), 0.32, 0.18, 0.22, 2)
+    rt := LoadRenderTexture(WIN_W(), WIN_H())
+
     cmodel := []Model{}  ccx := []int{}  ccz := []int{}  cused := []int{}
     p := 0
     while p < MAXC() {
@@ -331,8 +371,8 @@ func main() {
 
         cam := Camera3D{v3(camx, camy, camz), v3(camx + fx, camy + fy, camz + fz), v3(0.0, 1.0, 0.0), 66.0, 0}
 
-        // ---- render ----
-        BeginDrawing()
+        // ---- render the world into the off-screen target ----
+        BeginTextureMode(rt)
         ClearBackground(col(9, 8, 15))
         DrawRectangleGradientV(0, 0, WIN_W(), WIN_H(), col(22, 12, 36), col(86, 44, 46))
         BeginMode3D(cam)
@@ -346,9 +386,17 @@ func main() {
             s = s + 1
         }
         EndMode3D()
+        EndTextureMode()
 
+        // ---- composite to the screen through the post-process shader ----
+        BeginDrawing()
+        ClearBackground(col(0, 0, 0))
+        SetShaderValueTexture(sh, locDepth, rt.depth)
+        BeginShaderMode(sh)
+        DrawTextureRec(rt.texture, Rectangle{0.0, 0.0, float(WIN_W()), 0.0 - float(WIN_H())}, Vector2{0.0, 0.0}, white())
+        EndShaderMode()
         DrawText("machin - cyberpunk planet", 18, 14, 24, col(90, 240, 240))
-        DrawText("WASD + mouse to fly  ·  Space/Ctrl up/down  ·  Shift boost  ·  infinite noise world", 18, 44, 16, col(210, 120, 200))
+        DrawText("WASD + mouse to fly  ·  Space/Ctrl up/down  ·  Shift boost  ·  shader fog", 18, 44, 16, col(210, 120, 200))
         EndDrawing()
     }
 
