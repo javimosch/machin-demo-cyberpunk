@@ -24,6 +24,7 @@ extern "raylib" {
     cstruct Texture2D { id u32 width i32 height i32 mipmaps i32 format i32 }
     cstruct RenderTexture2D { id u32 texture Texture2D depth Texture2D }
     cstruct Shader { id u32 locs ptr }
+    cstruct Material { shader Shader maps ptr }
     fn InitWindow(i32, i32, string)
     fn SetTargetFPS(i32)
     fn WindowShouldClose() bool
@@ -54,6 +55,9 @@ extern "raylib" {
     fn BeginShaderMode(Shader)
     fn EndShaderMode()
     fn DrawTextureRec(Texture2D, Rectangle, Vector2, Color)
+    fn GetShaderLocationAttrib(Shader, string) i32
+    fn LoadMaterialDefault() Material
+    fn DrawMeshInstanced(Mesh, Material, ptr, i32)
     fn CloseWindow()
 }
 
@@ -67,6 +71,9 @@ func CELLS() (n) { n = 16 }        // terrain mesh resolution per chunk
 func RAD() (n) { n = 3 }           // chunk radius around camera
 func MAXC() (n) { n = 72 }         // chunk slot pool size
 func BUDGET() (n) { n = 4 }        // max chunk meshes built per frame (keeps motion smooth)
+func MAXP() (n) { n = 4200 }       // max instanced plants per frame
+func PRAD() (n) { n = 26 }         // plant grid radius (cells)
+func PSP() (n) { n = 4.5 }         // plant grid spacing
 
 func col(r, g, b) (c) { c = Color{r, g, b, 255} }
 func white() (c) { c = Color{255, 255, 255, 255} }
@@ -77,6 +84,10 @@ func VS() (s) { s = "#version 330\nin vec3 vertexPosition;\nin vec2 vertexTexCoo
 // cyberpunk post-process: depth fog into the haze (skipping the sky), chromatic
 // aberration, a blue lift, scanlines, and a vignette.
 func FS() (s) { s = "#version 330\nin vec2 fragTexCoord;\nout vec4 finalColor;\nuniform sampler2D texture0;\nuniform sampler2D depthTex;\nuniform vec2 resolution;\nuniform float nearp;\nuniform float farp;\nuniform vec3 fogColor;\nvoid main(){\nvec2 uv=fragTexCoord;\nvec2 dd=uv-0.5;\nfloat ca=0.0022;\nvec3 c;\nc.r=texture(texture0,uv+dd*ca).r;\nc.g=texture(texture0,uv).g;\nc.b=texture(texture0,uv-dd*ca).b;\nfloat dep=texture(depthTex,uv).r;\nfloat z=dep*2.0-1.0;\nfloat lin=(2.0*nearp*farp)/(farp+nearp-z*(farp-nearp));\nfloat fog=clamp((lin-50.0)/230.0,0.0,1.0);\nif(dep>0.9995)fog=0.0;\nc=mix(c,fogColor,fog*fog);\nc.b+=0.03;\nc=pow(max(c,vec3(0.0)),vec3(0.92));\nc*=0.90+0.10*sin(uv.y*resolution.y*1.4);\nc*=mix(0.5,1.0,smoothstep(0.95,0.25,length(dd)));\nfinalColor=vec4(c,1.0);\n}" }
+
+// GPU-instancing shaders: the vertex shader reads a per-instance mat4 attribute
+func IVS() (s) { s = "#version 330\nin vec3 vertexPosition;\nin vec4 vertexColor;\nin mat4 instanceTransform;\nout vec4 fragColor;\nuniform mat4 mvp;\nvoid main(){fragColor=vertexColor;gl_Position=mvp*instanceTransform*vec4(vertexPosition,1.0);}" }
+func IFS() (s) { s = "#version 330\nin vec4 fragColor;\nout vec4 finalColor;\nuniform vec4 colDiffuse;\nvoid main(){finalColor=fragColor*colDiffuse;}" }
 
 // set a uniform from a small raw buffer (kind: 0 float, 1 vec2, 2 vec3)
 func set_uniform(sh, loc, a, b, c, kind) {
@@ -170,13 +181,63 @@ func build_chunk(cx, cz) (model) {
     model = LoadModelFromMesh(mesh)
 }
 
+// the instance mesh: one small dead-scrub spike (a 4-sided green pyramid)
+func build_plant() (m) {
+    vb := alloc(12 * 12)  cb := alloc(12 * 4)
+    vi := 0
+    vi = put_tri(vb, cb, vi, 0.0, 1.5, 0.0, 0.0 - 0.34, 0.0, 0.0 - 0.34, 0.34, 0.0, 0.0 - 0.34, 52, 92, 46)
+    vi = put_tri(vb, cb, vi, 0.0, 1.5, 0.0, 0.34, 0.0, 0.0 - 0.34, 0.34, 0.0, 0.34, 66, 120, 58)
+    vi = put_tri(vb, cb, vi, 0.0, 1.5, 0.0, 0.34, 0.0, 0.34, 0.0 - 0.34, 0.0, 0.34, 52, 92, 46)
+    vi = put_tri(vb, cb, vi, 0.0, 1.5, 0.0, 0.0 - 0.34, 0.0, 0.34, 0.0 - 0.34, 0.0, 0.0 - 0.34, 66, 120, 58)
+    m = Mesh{12, 4, vb, cb, 0, 0}
+    UploadMesh(m, false)
+}
+
+// scatter plants on a world grid around the camera (deterministic -> stable, no
+// flicker) into the transform buffer; return the instance count. Each transform
+// is a scale+translate matrix in raylib's memory layout (translation @12/28/44).
+func fill_flora(tbuf, camx, camz) (count) {
+    count = 0
+    ccx := int(floor(camx / PSP()))
+    ccz := int(floor(camz / PSP()))
+    pr := PRAD()
+    dz := 0 - pr
+    while dz <= pr {
+        dx := 0 - pr
+        while dx <= pr {
+            if count < MAXP() {
+                wx := float(ccx + dx) * PSP()
+                wz := float(ccz + dz) * PSP()
+                d := rnd(wx, wz, 30.0)
+                if d > 0.60 {
+                    gh := terrain_h(wx, wz)
+                    sc := 0.6 + d * 1.5
+                    b := count * 64
+                    poke_f32(tbuf, b + 0, sc)
+                    poke_f32(tbuf, b + 20, sc * 1.7)
+                    poke_f32(tbuf, b + 40, sc)
+                    poke_f32(tbuf, b + 60, 1.0)
+                    poke_f32(tbuf, b + 12, wx)
+                    poke_f32(tbuf, b + 28, gh)
+                    poke_f32(tbuf, b + 44, wz)
+                    count = count + 1
+                }
+            }
+            dx = dx + 1
+        }
+        dz = dz + 1
+    }
+}
+
 // ---- buildings: grimy grey opaque megastructures, 100+ procedural variants ----
 // a tower = a stack of setback boxes (grey, darker/grimier at the base), with
 // variety in segments, dimensions, grime tint, lit windows, antennas, and the odd
 // neon sign. Drawn immediate; deterministic from world position.
 
 func draw_building(bx, bz) {
-    if rnd(bx, bz, 1.0) < 0.42 { }    // density: ~58% of cells host a tower
+    // city districts (low-freq noise) cluster the towers; elsewhere is open
+    // scrubland (flora) — so the instanced plants show between the city zones.
+    if rnd(bx, bz, 1.0) < 0.42 || noise2(bx * 0.006, bz * 0.006) < 0.0 - 0.10 { }
     else {
         gh := terrain_h(bx, bz)
         h0 := rnd(bx, bz, 2.0)
@@ -248,21 +309,16 @@ func draw_scatter(cx, cz, t) {
             gh := terrain_h(px, pz)
             kind := rnd(px, pz, 20.0)
             // skip where a building likely stands (coarse check on the building grid)
-            if kind > 0.30 {
-                if kind < 0.55 {
-                    // scrub: a small dark-green tuft
-                    DrawCube(v3(px, gh + 0.6, pz), 0.8, 1.2, 0.8, col(34, 60, 34))
+            if kind > 0.58 {
+                if kind < 0.76 {
+                    // debris / rubble
+                    DrawCube(v3(px, gh + 0.4, pz), 1.4, 0.8, 1.0, col(60, 56, 50))
                 } else {
-                    if kind < 0.74 {
-                        // debris / rubble
-                        DrawCube(v3(px, gh + 0.4, pz), 1.4, 0.8, 1.0, col(60, 56, 50))
-                    } else {
-                        if kind > 0.93 {
-                            // fauna: a drone hovering + bobbing, with a neon eye
-                            bob := 6.0 + 2.0 * sin(t * 1.5 + px * 0.3)
-                            DrawCube(v3(px, gh + bob, pz), 1.2, 0.5, 1.2, col(40, 42, 48))
-                            DrawCube(v3(px, gh + bob, pz + 0.7), 0.4, 0.4, 0.4, neon(int(px + pz)))
-                        }
+                    if kind > 0.93 {
+                        // fauna: a drone hovering + bobbing, with a neon eye
+                        bob := 6.0 + 2.0 * sin(t * 1.5 + px * 0.3)
+                        DrawCube(v3(px, gh + bob, pz), 1.2, 0.5, 1.2, col(40, 42, 48))
+                        DrawCube(v3(px, gh + bob, pz + 0.7), 0.4, 0.4, 0.4, neon(int(px + pz)))
                     }
                 }
             }
@@ -301,6 +357,15 @@ func main() {
     set_uniform(sh, GetShaderLocation(sh, "farp"), 1000.0, 0.0, 0.0, 0)
     set_uniform(sh, GetShaderLocation(sh, "fogColor"), 0.32, 0.18, 0.22, 2)
     rt := LoadRenderTexture(WIN_W(), WIN_H())
+
+    // GPU instancing for the flora: one plant mesh + an instancing shader/material,
+    // drawn for thousands of plants in a single DrawMeshInstanced call.
+    plant := build_plant()
+    ish := LoadShaderFromMemory(IVS(), IFS())
+    poke_i32(ish.locs, 36, GetShaderLocationAttrib(ish, "instanceTransform"))   // locs[SHADER_LOC_MATRIX_MODEL]
+    matdef := LoadMaterialDefault()
+    imat := Material{ish, matdef.maps}
+    tbuf := alloc(MAXP() * 64)
 
     cmodel := []Model{}  ccx := []int{}  ccz := []int{}  cused := []int{}
     p := 0
@@ -385,6 +450,8 @@ func main() {
             }
             s = s + 1
         }
+        np := fill_flora(tbuf, camx, camz)
+        DrawMeshInstanced(plant, imat, tbuf, np)   // thousands of plants in one draw call
         EndMode3D()
         EndTextureMode()
 

@@ -37,7 +37,17 @@ The post-process loop:
 1. `BeginTextureMode(rt)` → clear → sky gradient → `BeginMode3D` → world → `EndMode3D` → `EndTextureMode`.
 2. `SetShaderValueTexture(sh, locDepth, rt.depth)` (bind the depth attachment), `BeginShaderMode(sh)`, `DrawTextureRec(rt.texture, Rectangle{0,0, W, -H}, ...)` (the **negative height flips** the upside-down render target), `EndShaderMode`, then the HUD.
 
-GLSL is passed as MFL strings (`\n`-escaped, single line — a literal newline would break the one-decl-per-line source). The VS is the standard raylib passthrough (`vertexPosition`/`vertexTexCoord`/`vertexColor`/`mvp`); the FS samples `texture0` (auto-bound by `DrawTextureRec`) + `depthTex` (set explicitly). **Depth fog:** linearize `texture(depthTex,uv).r` with the camera near/far (0.01/1000), fog by distance, and **skip pixels with `depth > 0.9995`** (the cleared sky) so the gradient shows through. Set scalar/vec uniforms once from a small `alloc`'d buffer (`SHADER_UNIFORM_FLOAT=0`, `VEC2=1`, `VEC3=2`). The same path enables real GPU instancing (an instancing VS) and textured materials — the rest of the shader frontier.
+GLSL is passed as MFL strings (`\n`-escaped, single line — a literal newline would break the one-decl-per-line source). The VS is the standard raylib passthrough (`vertexPosition`/`vertexTexCoord`/`vertexColor`/`mvp`); the FS samples `texture0` (auto-bound by `DrawTextureRec`) + `depthTex` (set explicitly). **Depth fog:** linearize `texture(depthTex,uv).r` with the camera near/far (0.01/1000), fog by distance, and **skip pixels with `depth > 0.9995`** (the cleared sky) so the gradient shows through. Set scalar/vec uniforms once from a small `alloc`'d buffer (`SHADER_UNIFORM_FLOAT=0`, `VEC2=1`, `VEC3=2`). The same path enables textured materials — the rest of the shader frontier.
+
+## GPU instancing (flora) — thousands of meshes in one draw call
+
+Also composition. `Material` is a partial cstruct `{ shader Shader, maps ptr }` (the C `Material` also has a `params[4]` array, which can't be a cstruct field — but it's left zeroed by the designated-initializer marshaling, which is fine). Recipe:
+1. `ish := LoadShaderFromMemory(IVS, IFS)` with an instancing VS that declares `in mat4 instanceTransform;` and does `gl_Position = mvp * instanceTransform * vec4(vertexPosition,1.0)`.
+2. **raylib 5.0 has no `SHADER_LOC_VERTEX_INSTANCE_TX`** — it uses `SHADER_LOC_MATRIX_MODEL` (enum index **9**) as the instance-transform attribute. Set it: `poke_i32(ish.locs, 36, GetShaderLocationAttrib(ish, "instanceTransform"))` (36 = 9·4 bytes into the `int* locs`).
+3. `md := LoadMaterialDefault(); imat := Material{ish, md.maps}` — your shader + the default maps (white diffuse texture/color).
+4. Build a small instance `Mesh` (upload once). Each frame, fill a raw `Matrix[]` buffer (`alloc(MAXP*64)`) — per instance a scale+translate matrix in raylib's memory layout: **translation at byte offsets 12/28/44** (the `m12/m13/m14` fields), **scale at 0/20/40**, **1.0 at 60**, rest zero. Then `DrawMeshInstanced(mesh, imat, tbuf, count)` inside `BeginMode3D`.
+
+Keep positions **deterministic** (a world grid + `noise2` gate) so instances don't flicker as the camera moves.
 
 ## Patterns worth copying
 
